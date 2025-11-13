@@ -85,7 +85,7 @@ class HUDFProject:
             return self.hudf_coord
             
         except ValueError as e:
-            logger.error("✗ Failed to resolve coordinates")
+            logger.error("Failed to resolve coordinates")
             raise
     
     def step2_search_observations(self):
@@ -122,7 +122,7 @@ class HUDFProject:
             return self.observations
             
         except Exception as e:
-            logger.error("✗ Search failed")
+            logger.error("Search failed")
             raise
     
     def step3_download_images(self):
@@ -130,10 +130,10 @@ class HUDFProject:
         Step 3: Download FITS images for each filter.
 
         Returns:
-        Dictionary mapping filter names to local FITS file paths.
+            Dictionary mapping filter names to lists of local FITS file paths.
 
         Raises:
-        RuntimeError: If no observations have been found yet.
+            RuntimeError: If no observations have been found yet.
         """
         if not self.observations:
             raise RuntimeError("Must search for observations before downloading")
@@ -142,8 +142,51 @@ class HUDFProject:
         logger.info("STEP 3: Downloading FITS Images")
         logger.info("="*60)
 
+        # Use current directory for downloads
+        download_dir = Path.cwd() / "hudf_data"
+        download_dir.mkdir(exist_ok=True)
+        
+        # Clean up files that don't match our filter criteria
+        logger.info("Cleaning up unwanted files...")
+        logger.info(f"Scanning directory: {download_dir}")
+        
+        # Check if directory exists and has content
+        if not download_dir.exists():
+            logger.info("Download directory doesn't exist yet")
+        else:
+            all_files = list(download_dir.rglob("*"))
+            logger.info(f"Found {len(all_files)} total items (files and directories)")
+            
+            files_removed = 0
+            for filepath in all_files:
+                if filepath.is_file():
+                    filename = filepath.name.lower()
+                    # Remove files that are NOT drizzled FITS or contain unwanted patterns
+                    should_remove = False
+                    
+                    # Check if it's a FITS file first
+                    if filename.endswith('.fits'):
+                        # If it's a FITS file but NOT drizzled, remove it
+                        if not (filename.endswith('_drz.fits') or filename.endswith('_drc.fits')):
+                            should_remove = True
+                    # Remove catalog and auxiliary files
+                    elif any(x in filename for x in ['_cat.', '_point-cat.', '.ecsv', '.txt', '.xml']):
+                        should_remove = True
+                    
+                    if should_remove:
+                        try:
+                            filepath.unlink()
+                            logger.info(f"  Removed: {filepath.relative_to(download_dir)}")
+                            files_removed += 1
+                        except Exception as e:
+                            logger.error(f"  Failed to remove {filepath.name}: {e}")
+            
+            if files_removed > 0:
+                logger.info(f"Removed {files_removed} unwanted files")
+            else:
+                logger.info("No unwanted files found")
+
         fits_files = {}
-        download_dir = Path("./hudf_data")
         download_dir.mkdir(exist_ok=True)
 
         for filter_name in self.filters:
@@ -151,8 +194,10 @@ class HUDFProject:
 
             obs_table = self.observations.get(filter_name)
             if obs_table is None or len(obs_table) == 0:
-                logger.warning(f"  ✗ No observations found for {filter_name}")
+                logger.warning(f"No observations found for {filter_name}")
                 continue
+
+            fits_files[filter_name] = []
 
             try:
                 # Get the first observation
@@ -162,35 +207,75 @@ class HUDFProject:
 
                 # Get associated data products
                 products = Observations.get_product_list(obs_row)
+                
+                logger.info(f"  Total products found: {len(products)}")
 
-                # --- NEW: Download any SCIENCE product, not just drz ---
-                science_products = [p for p in products if p['productType'].upper() == 'SCIENCE']
+                # Filter for ONLY drizzled products (_drz.fits or _drc.fits)
+                science_products = []
+                for p in products:
+                    filename = p['productFilename'].lower()
+                    
+                    # ONLY accept drizzled FITS files
+                    if filename.endswith('_drz.fits') or filename.endswith('_drc.fits'):
+                        science_products.append(p)
+                        logger.info(f"    Found drizzled: {p['productFilename']}")
 
                 if len(science_products) == 0:
-                    logger.warning(f"  ✗ No science products found for {filter_name}")
+                    logger.warning(f"No _drz.fits or _drc.fits files found for {filter_name}")
+                    # List what WAS found to debug
+                    logger.info(f"  Available products:")
+                    for p in products[:5]:  # Show first 5
+                        logger.info(f"    - {p['productFilename']}")
                     continue
 
-                # Download the first science product
-                product_to_download = science_products[0]
-                logger.info(f"  Downloading {product_to_download['productFilename']}...")
-                manifest = Observations.download_products(
-                    product_to_download,
-                    download_dir=str(download_dir)
-                )
+                logger.info(f"  Found {len(science_products)} drizzled products to download")
 
-                # Get the local path
-                local_path = manifest['Local Path'][0]
-                fits_files[filter_name] = local_path
-                logger.info(f"Downloaded to: {local_path}")
+                # Download all science products
+                for idx, product in enumerate(science_products, 1):
+                    filename = product['productFilename']
+                    logger.info(f"  Product {idx}/{len(science_products)}: {filename}")
+                    
+                    # Check if file already exists in download directory
+                    existing_files = list(download_dir.rglob(f"*{filename}"))
+                    
+                    if existing_files:
+                        local_path = str(existing_files[0])
+                        logger.info(f"    Already exists: {local_path}")
+                        logger.info(f"    Skipping, downloading next file")
+                        fits_files[filter_name].append(local_path)
+                        continue
+                    
+                    # Download the product
+                    try:
+                        logger.info(f"    Downloading...")
+                        manifest = Observations.download_products(
+                            product,
+                            download_dir=str(download_dir)
+                        )
+
+                        # Get the local path
+                        local_path = manifest['Local Path'][0]
+                        fits_files[filter_name].append(local_path)
+                        logger.info(f"    Downloaded to: {local_path}")
+
+                    except Exception as e:
+                        logger.error(f"    Failed to download {filename}: {e}")
+                        continue
 
             except Exception as e:
-                logger.error(f"  ✗ Failed to download {filter_name}: {e}")
+                logger.error(f"Failed to process {filter_name}: {e}")
                 continue
 
+        # Log summary
+        total_files = sum(len(files) for files in fits_files.values())
+        logger.info(f"\nDownload summary:")
+        for filter_name, files in fits_files.items():
+            logger.info(f"  {filter_name}: {len(files)} files")
+        
         if len(fits_files) < len(self.filters):
-            logger.warning(f"Only downloaded {len(fits_files)}/{len(self.filters)} required filters")
+            logger.warning(f"Only downloaded files for {len(fits_files)}/{len(self.filters)} filters")
         else:
-            logger.info(f"Successfully downloaded all {len(fits_files)} filters")
+            logger.info(f"Successfully downloaded files for all {len(fits_files)} filters")
 
         return fits_files
     
@@ -218,8 +303,12 @@ class HUDFProject:
             missing_filters = [f for f in self.filters if f not in fits_files]
             if missing_filters:
                 logger.error(f"Missing FITS files for: {', '.join(missing_filters)}")
+                logger.error("Cannot create RGB composite without all three filters")
                 raise RuntimeError("Incomplete data - missing required filters")
             
+            logger.info("\n" + "#"*60)
+            logger.info("# PIPELINE COMPLETE")
+            logger.info("#"*60)
             
         except Exception as e:
             logger.error("\n" + "#"*60)
@@ -245,7 +334,7 @@ def main():
     # Create project instance with default settings
     project = HUDFProject(
         filters=['F435W', 'F606W', 'F850LP'],
-        search_radius=0.01
+        search_radius=0.1
     )
     
     # Run the complete pipeline

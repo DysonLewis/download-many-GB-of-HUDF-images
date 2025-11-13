@@ -52,11 +52,11 @@ def find_hst_images(
 ) -> Table:
     """
     Query MAST for HST observations near specified coordinates containing a filter.
-    Returns all SCIENCE products, not limited to drizzled files.
+    Returns observations that have drizzled (_drz.fits or _drc.fits) products.
     
     Args:
         coordinates: Target sky coordinates for the search.
-        filter_name: Name of the filter to search for (e.g., 'F435W').
+        filter_name: Name of the filter to search for (e.g., 'F435W', 'F850LP;CLEAR2L').
         radius_deg: Search radius in degrees. Default is 0.1 degrees.
         max_results: Maximum number of results to return. None for all results.
         
@@ -66,7 +66,7 @@ def find_hst_images(
     Raises:
         TypeError: If coordinates is not a SkyCoord object.
         ValueError: If filter_name is empty or radius_deg is non-positive.
-        RuntimeError: If no science products are found.
+        RuntimeError: If no drizzled products are found.
     """
     if not isinstance(coordinates, SkyCoord):
         raise TypeError("coordinates must be a SkyCoord object")
@@ -121,19 +121,25 @@ def find_hst_images(
         else:
             logger.warning(f"  No matching observations found for filter '{filter_name}'")
         
-        # Get all SCIENCE products
-        obs_with_science = []
+        # Filter for observations that have drizzled products
+        obs_with_drizzled = []
         for obs_row in filtered_obs:
             products = Observations.get_product_list(obs_row)
-            science_products = [p for p in products if p['productType'].upper() == 'SCIENCE']
-            if science_products:
-                obs_with_science.append(obs_row)
+            # Check if any drizzled products exist
+            has_drizzled = any(
+                p['productFilename'].lower().endswith('_drz.fits') or 
+                p['productFilename'].lower().endswith('_drc.fits')
+                for p in products
+            )
+            if has_drizzled:
+                obs_with_drizzled.append(obs_row)
         
-        if not obs_with_science:
-            raise RuntimeError(f"No science products found for filter '{filter_name}'")
+        if not obs_with_drizzled:
+            raise RuntimeError(f"No drizzled products (_drz.fits or _drc.fits) found for filter '{filter_name}'")
         
-        obs_with_science_table = Table(rows=obs_with_science, names=obs_with_science[0].colnames)
-        return obs_with_science_table
+        obs_with_drizzled_table = Table(rows=obs_with_drizzled, names=obs_with_drizzled[0].colnames)
+        logger.info(f"  {len(obs_with_drizzled_table)} observations have drizzled products")
+        return obs_with_drizzled_table
     
     except Exception as e:
         error_msg = f"Error querying MAST for filter '{filter_name}': {e}"
